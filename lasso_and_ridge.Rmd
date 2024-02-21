@@ -1,0 +1,138 @@
+---
+title: "LASSO and Ridge Regression Implementation"
+output: pdf_document
+date: "2024-02-18"
+author: "Hailey Johnson, Nathan Mitchell, Katie Myers"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(rsample)
+library(glmnet)
+library(scales)
+set.seed(478)
+```
+
+```{r Read Data}
+train <- read.csv("train.csv")
+test <- read.csv("test.csv")
+combined <- rbind(train %>% dplyr::select(-SalePrice), test)
+```
+
+To begin, we have a histogram of home sale price from the training dataset from Kaggle. We observe a peak in frequency around $150,000, but the distribution is heavily right skewed as some houses will be very expensive, but these are not as common. Prediction may be more difficult since the distribution is far from Normal.
+
+```{r Histogram of Sale Price, fig.align='center'}
+ggplot(train) +
+  geom_histogram(aes(x=SalePrice), fill='darkseagreen4', bins=30) +
+  labs(x="Sale Price ($)", y="Count", title="Distribution of Home Sale Price") +
+  scale_x_continuous(labels = label_comma()) +
+  theme_light()
+```
+
+The standard deviation of home sale price from the training set is about $79,400, so we can use this as a baseline for how accurate the models will be in our goal of prediction.
+
+```{r}
+sd(train$SalePrice)
+```
+
+```{r Prepare Data}
+combined <- combined %>% replace(is.na(.), "None")
+combined_df <- combined[, -1] %>%
+  mutate(across(where(is.numeric), scale))
+combined_df <- data.frame(model.matrix(~ ., data = combined_df))[, -1]
+combined_df$Id <- combined$Id
+```
+
+```{r Split Back into Train and Test}
+train_x <- combined_df[1:1460,]
+test_x <- combined_df[1461:2919,]
+train_x$SalePrice <- train$SalePrice
+```
+
+This step is to further split the training data into training and testing/validation so that we can get a test RMSE estimate of our models, since we can't actually know the real values of Sale Price in the testing dataset for the Kaggle competition.
+
+```{r Split Training}
+trainSplit <- initial_split(train_x, prop = 0.8)
+training <- training(trainSplit)
+testing <- testing(trainSplit)
+```
+
+```{r Prepare Testing Data}
+x_test <- as.matrix(testing %>% select(-SalePrice))
+y_test <- testing$SalePrice
+```
+
+Now we will begin to fit a LASSO model to our training dataset. We are using LASSO because it's a penalized regression technique that can lead to variable selection and therefore increased model interpretability, which can be valuable for problems such as these where we have so many predictors. We will use 10-fold cross validation to select an optimal value of lambda, the shrinkage parameter. Plotted below is the CV MSE vs the logarithm of lambda. We will use the value of lambda corresponding to the lowest CV error in our final model.
+
+```{r LASSO: Find Optimal Lambda}
+x <- as.matrix(training %>% select(-SalePrice))
+y <- training$SalePrice
+lasso_mod_cv <- cv.glmnet(x, y, alpha=1)
+plot(lasso_mod_cv)
+best_lambda_lasso <- lasso_mod_cv$lambda.min
+```
+
+However, because of the One-Hot encoding using all of the categorical predictors adding so many columns, we still have far too many variables for our model to be very interpretable--definitely a disadvantage of this implementation.
+
+```{r}
+length(coefficients(lasso_mod_cv))
+```
+
+Finally, we can fit the model using the best value of lambda and obtain a test RMSE estimate of about $30,000--less than half of the standard deviation of home sale price.
+
+```{r LASSO: Use Model to Get Test RMSE}
+lasso_mod <- glmnet(x, y, alpha=1)
+pred_lasso <- predict(lasso_mod, s = best_lambda_lasso, newx = x_test)
+rmse_lasso <- sqrt( sum( (pred_lasso - y_test)^2 )/length(y_test) )
+rmse_lasso
+```
+
+Next, we will fit a Ridge Regression model as well: Ridge Regression does not use variable selection as it won't reduce any coefficients entirely to zero, so we wanted to try this approach as well in case using all predictors would lead to more accuracy. Below is a similar plot of CV MSE vs the logarithm of lambda, and again we are using the value of lambda corresponding to the lowest CV error, in this case occurring at the beginning of the range.
+
+```{r Ridge: Find Optimal Lambda}
+ridge_mod_cv <- cv.glmnet(x, y, alpha=0)
+plot(ridge_mod_cv)
+best_lambda_ridge <- ridge_mod_cv$lambda.min
+```
+
+We finalize the model with the optimal value of lambda and use this to obtain a test RMSE just like with the LASSO model. However, this time the RMSE is much higher, at almost $50,000.
+
+```{r Ridge: Use Model to Get Test RMSE}
+ridge_mod <- glmnet(x, y, alpha=0)
+pred_ridge <- predict(ridge_mod, s = best_lambda_ridge, newx = x_test)
+rmse_ridge <- sqrt( sum( (pred_ridge - y_test )^2 )/length(y_test) )
+rmse_ridge
+```
+
+Comparing the models by test RMSE, it's clear that the LASSO model leads to more accurate predictions of home sales price, so we will use that model for our final predictions on the test dataset given by Kaggle.
+
+```{r Calculate Predictions}
+pred_final <- predict(lasso_mod, s = best_lambda_lasso, newx = as.matrix(test_x))
+rownames(pred_final) <- NULL
+```
+
+```{r Create Submission Dataframe}
+submission_df <- data.frame(ID = test_x$Id, Predictions = pred_final)
+colnames(submission_df) <- c("ID", "Predictions")
+head(submission_df)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
